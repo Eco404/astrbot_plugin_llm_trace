@@ -4,5 +4,5 @@ desc: 以时间线方式记录 AstrBot LLM 请求、工具调用和最终响应�
 short_desc: 可视化调试 LLM 请求、工具调用与响应。
 version: 0.1.4
 author: econeco
-repo: ""
+repo: https://github.com/Eco404/astrbot_plugin_llm_trace
 astrbot_version: ">=4.24,<5"
