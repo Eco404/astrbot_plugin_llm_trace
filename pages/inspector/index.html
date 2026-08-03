@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Trace</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">ASTRBOT OBSERVABILITY</p>
+        <h1>LLM Trace</h1>
+        <p class="subtitle">检查请求、工具调用与最终响应的完整时间线</p>
+      </div>
+      <div class="controls">
+        <label class="capture-switch">
+          <span id="captureLabel">采集已关闭</span>
+          <input id="captureToggle" type="checkbox" />
+          <span class="switch-track"><span></span></span>
+        </label>
+        <button id="refreshButton" class="button secondary" type="button">刷新</button>
+        <button id="clearButton" class="button danger" type="button">清空</button>
+      </div>
+    </header>
+
+    <section class="status-strip" aria-label="运行状态">
+      <div><span>状态</span><strong id="connectionStatus">连接中</strong></div>
+      <div><span>待写入</span><strong id="queueSize">—</strong></div>
+      <div><span>已丢弃</span><strong id="droppedRecords">—</strong></div>
+      <div><span>数据策略</span><strong id="privacyMode">—</strong></div>
+    </section>
+
+    <main class="workspace">
+      <aside class="run-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">RUNS</p>
+            <h2>最近记录</h2>
+          </div>
+          <span id="runCount" class="count-badge">0</span>
+        </div>
+        <label class="search-box">
+          <span>⌕</span>
+          <input id="searchInput" type="search" placeholder="模型、Provider 或会话" />
+        </label>
+        <div id="runList" class="run-list" aria-live="polite"></div>
+      </aside>
+
+      <section class="detail-panel">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-mark">⌁</div>
+          <h2>选择一条 Trace</h2>
+          <p>左侧会显示最近的 Agent 运行。开启采集并发送一条消息即可开始。</p>
+        </div>
+
+        <div id="traceDetail" class="trace-detail hidden">
+          <div class="detail-heading">
+            <div>
+              <p id="detailRunId" class="mono muted"></p>
+              <h2 id="detailTitle">Trace</h2>
+              <p id="detailMeta" class="muted"></p>
+            </div>
+            <button
+              id="deleteButton"
+              class="icon-button delete-icon"
+              title="删除这条 Trace"
+              aria-label="删除这条 Trace"
+              type="button"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" />
+              </svg>
+            </button>
+          </div>
+          <section id="charStats" class="char-stats" aria-label="字符统计"></section>
+          <div id="timeline" class="timeline"></div>
+          <section class="payload-card">
+            <div class="payload-heading">
+              <div>
+                <p class="eyebrow">PAYLOAD</p>
+                <h3 id="payloadTitle">事件详情</h3>
+              </div>
+              <button id="copyButton" class="button secondary compact" type="button">复制 JSON</button>
+            </div>
+            <pre id="payloadView">{}</pre>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status"></div>
+    <div id="confirmOverlay" class="confirm-overlay hidden" role="presentation">
+      <section class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+        <p class="eyebrow">CONFIRM ACTION</p>
+        <h2 id="confirmTitle">确认操作</h2>
+        <p id="confirmMessage" class="muted"></p>
+        <div class="confirm-actions">
+          <button id="confirmCancel" class="button secondary" type="button">取消</button>
+          <button id="confirmAccept" class="button danger solid" type="button">确认删除</button>
+        </div>
+      </section>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

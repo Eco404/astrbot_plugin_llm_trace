@@ -1,0 +1,2 @@
+"""AstrBot LLM Trace plugin."""
+

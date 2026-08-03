@@ -1,0 +1,52 @@
+{
+  "enabled": {
+    "description": "启用 Trace 采集",
+    "hint": "采集内容可能包含聊天记录和系统提示词。建议只在调试期间开启。",
+    "type": "bool",
+    "default": false
+  },
+  "capture_content": {
+    "description": "记录消息正文",
+    "hint": "关闭后只记录消息角色、数量、长度和哈希。",
+    "type": "bool",
+    "default": true
+  },
+  "capture_reasoning": {
+    "description": "记录模型推理内容",
+    "type": "bool",
+    "default": true
+  },
+  "capture_raw_response": {
+    "description": "记录 Provider 原始响应",
+    "hint": "raw_completion 可能很大，并可能包含服务商返回的额外元数据。",
+    "type": "bool",
+    "default": true
+  },
+  "hash_identity": {
+    "description": "哈希会话与用户标识",
+    "type": "bool",
+    "default": true
+  },
+  "max_text_chars": {
+    "description": "单个文本字段最大字符数",
+    "type": "int",
+    "default": 20000
+  },
+  "max_runs": {
+    "description": "最多保留 Trace 数量",
+    "type": "int",
+    "default": 200
+  },
+  "retention_hours": {
+    "description": "Trace 保留小时数",
+    "hint": "设为 0 表示不按时间清理，仍受最大数量限制。",
+    "type": "int",
+    "default": 24
+  },
+  "queue_size": {
+    "description": "异步写入队列大小",
+    "type": "int",
+    "default": 1000
+  }
+}
+
