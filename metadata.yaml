@@ -2,7 +2,7 @@ name: astrbot_plugin_llm_trace
 display_name: LLM Trace
 desc: 以时间线方式记录 AstrBot LLM 请求、工具调用和最终响应，帮助调试模型实际上下文。
 short_desc: 可视化调试 LLM 请求、工具调用与响应。
-version: 0.1.4
+version: 0.2.0
 author: econeco
 repo: https://github.com/Eco404/astrbot_plugin_llm_trace
 astrbot_version: ">=4.24,<5"

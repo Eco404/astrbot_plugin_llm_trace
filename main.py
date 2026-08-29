@@ -19,7 +19,7 @@ from .serializer import TraceSerializer
 from .storage import TraceStore
 
 PLUGIN_NAME = "astrbot_plugin_llm_trace"
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.2.0"
 RUN_ID_EXTRA_KEY = "_llm_trace_run_id"
 
 
