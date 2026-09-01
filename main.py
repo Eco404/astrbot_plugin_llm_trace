@@ -141,6 +141,21 @@ class LLMTracePlugin(Star):
             except asyncio.QueueFull:
                 pass
 
+    def _finish_run(self, run_id: str, *, status: str) -> bool:
+        """Finish a trace once and release its in-memory correlation state."""
+        if run_id not in self._sequence_by_run:
+            return False
+        self.store.submit(
+            {
+                "kind": "finish",
+                "run_id": run_id,
+                "timestamp": time.time(),
+                "status": status,
+            }
+        )
+        self._sequence_by_run.pop(run_id, None)
+        return True
+
     def _provider_metadata(self, event: AstrMessageEvent, req: ProviderRequest) -> dict:
         metadata = {"provider_id": "", "provider_type": "", "model": req.model or ""}
         try:
@@ -391,36 +406,42 @@ class LLMTracePlugin(Star):
         resp: LLMResponse,
     ) -> None:
         """Finish a trace after the Agent lifecycle is complete."""
-        if not self.enabled:
-            return
         run_id = self._run_id(event)
         if not run_id:
             return
-        self._record(
+        if self.enabled:
+            self._record(
+                run_id,
+                "agent.done",
+                {
+                    "messages": self.serializer.messages(run_context.messages),
+                    "message_count": len(run_context.messages),
+                    "response_id": getattr(resp, "id", None),
+                },
+            )
+        self._finish_run(
             run_id,
-            "agent.done",
-            {
-                "messages": self.serializer.messages(run_context.messages),
-                "message_count": len(run_context.messages),
-                "response_id": getattr(resp, "id", None),
-            },
+            status="completed" if resp and resp.role != "err" else "error",
         )
-        self.store.submit(
-            {
-                "kind": "finish",
-                "run_id": run_id,
-                "timestamp": time.time(),
-                "status": "completed" if resp and resp.role != "err" else "error",
-            }
-        )
-        self._sequence_by_run.pop(run_id, None)
 
     @filter.after_message_sent()
     async def cleanup_finished_event(self, event: AstrMessageEvent) -> None:
-        """Release correlation state for requests stopped outside the Agent."""
+        """Mark a request that bypassed Agent completion as an error fallback."""
         run_id = self._run_id(event)
-        if run_id:
-            self._sequence_by_run.pop(run_id, None)
+        if not run_id or run_id not in self._sequence_by_run:
+            return
+        result = event.get_result()
+        result_type = getattr(getattr(result, "result_content_type", None), "name", "")
+        if self.enabled:
+            self._record(
+                run_id,
+                "agent.error",
+                {
+                    "reason": "response sent without an Agent completion event",
+                    "result_content_type": result_type,
+                },
+            )
+        self._finish_run(run_id, status="error")
 
     @filter.command_group("llmtrace")
     def llmtrace():

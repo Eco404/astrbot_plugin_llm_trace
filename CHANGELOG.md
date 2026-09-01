@@ -5,6 +5,12 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+
+- 当 LLM 错误路径未触发 Agent 完成事件时，将 Trace 收尾为错误状态。
+
 ## [0.2.0] - 2026-08-29
 
 ### Changed
