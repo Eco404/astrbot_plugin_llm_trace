@@ -20,6 +20,16 @@ const elements = {
   detailTitle: document.getElementById("detailTitle"),
   detailStatus: document.getElementById("detailStatus"),
   detailMeta: document.getElementById("detailMeta"),
+  exportButton: document.getElementById("exportButton"),
+  exportOverlay: document.getElementById("exportOverlay"),
+  exportDialog: document.getElementById("exportDialog"),
+  exportDescription: document.getElementById("exportDescription"),
+  exportSelectAll: document.getElementById("exportSelectAll"),
+  exportSelectedCount: document.getElementById("exportSelectedCount"),
+  exportEventList: document.getElementById("exportEventList"),
+  exportError: document.getElementById("exportError"),
+  exportCancel: document.getElementById("exportCancel"),
+  exportAccept: document.getElementById("exportAccept"),
   deleteButton: document.getElementById("deleteButton"),
   deletePopover: document.getElementById("deletePopover"),
   deleteMessage: document.getElementById("deleteMessage"),
@@ -50,8 +60,11 @@ let searchTimer = null;
 let refreshTimer = null;
 let toastTimer = null;
 let clearPreviousFocus = null;
+let exportPreviousFocus = null;
 let deletePending = false;
 let clearPending = false;
+let exportPending = false;
+let exportSelection = new Set();
 const mobileLayout = window.matchMedia("(max-width: 720px)");
 
 const STATUS_LABELS = {
@@ -89,6 +102,30 @@ function showToast(message) {
 function setConfirmationError(element, message = "") {
   element.textContent = message;
   element.classList.toggle("hidden", !message);
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) {
+    // Restricted plugin iframes may reject the modern Clipboard API.
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.append(textarea);
+  textarea.select();
+  try {
+    return document.execCommand("copy");
+  } finally {
+    textarea.remove();
+  }
 }
 
 function applyTheme(context) {
@@ -242,6 +279,91 @@ function eventSummary(event) {
   return messageCount === null ? "" : `${messageCount} 条消息`;
 }
 
+function renderExportSelectionControls() {
+  const events = selectedRun?.events || [];
+  const selectedCount = exportSelection.size;
+  const hasEvents = events.length > 0;
+  elements.exportSelectAll.checked = hasEvents && selectedCount === events.length;
+  elements.exportSelectAll.indeterminate = selectedCount > 0 && selectedCount < events.length;
+  elements.exportSelectAll.disabled = !hasEvents;
+  elements.exportSelectedCount.textContent = `${selectedCount} / ${events.length}`;
+  elements.exportAccept.disabled = exportPending || selectedCount === 0;
+  if (!exportPending) {
+    elements.exportAccept.textContent = `复制 ${selectedCount} 项内容`;
+  }
+}
+
+function renderExportEventList() {
+  const events = selectedRun?.events || [];
+  elements.exportEventList.replaceChildren();
+
+  for (const [index, event] of events.entries()) {
+    const option = document.createElement("label");
+    option.className = "export-event-option";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = exportSelection.has(index);
+    checkbox.setAttribute("aria-label", `${event.event_type} ${formatTime(event.timestamp, true)}`);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        exportSelection.add(index);
+      } else {
+        exportSelection.delete(index);
+      }
+      option.classList.toggle("selected", checkbox.checked);
+      renderExportSelectionControls();
+    });
+
+    const detail = document.createElement("span");
+    detail.className = "export-event-detail";
+    const title = document.createElement("strong");
+    title.textContent = event.event_type;
+    const summary = document.createElement("span");
+    summary.textContent = eventSummary(event) || "-";
+    summary.title = summary.textContent;
+    detail.append(title, summary);
+
+    const time = document.createElement("time");
+    time.className = "export-event-time";
+    time.textContent = formatTime(event.timestamp, true);
+    time.dateTime = new Date(event.timestamp * 1000).toISOString();
+
+    option.classList.toggle("selected", checkbox.checked);
+    option.append(checkbox, detail, time);
+    elements.exportEventList.append(option);
+  }
+
+  renderExportSelectionControls();
+}
+
+function buildTraceExport() {
+  if (!selectedRun) return "";
+  const modelName = selectedRun.model || selectedRun.provider_id || "LLM Trace";
+  const events = (selectedRun.events || []).filter((_, index) => exportSelection.has(index));
+  const lines = [
+    "# LLM Trace",
+    `模型: ${modelName}`,
+    `平台: ${selectedRun.platform || "unknown"}`,
+    `状态: ${statusLabel(selectedRun.status)}`,
+    `开始时间: ${formatTime(selectedRun.started_at, true)}`,
+    `运行时长: ${duration(selectedRun)}`,
+    `Trace ID: ${selectedRun.run_id}`,
+  ];
+
+  for (const event of events) {
+    lines.push(
+      "",
+      `## ${event.event_type} · ${formatTime(event.timestamp, true)}`,
+      `摘要: ${eventSummary(event) || "-"}`,
+      "```json",
+      JSON.stringify(event.payload ?? {}, null, 2),
+      "```",
+    );
+  }
+  return lines.join("\n");
+}
+
 function renderCharacterStats() {
   elements.charStats.replaceChildren();
   const requestEvent = selectedRun?.events?.find((event) => event.event_type === "llm.request");
@@ -361,6 +483,7 @@ function renderDetail() {
   elements.detailStatus.dataset.status = state;
   elements.detailMeta.textContent = `${selectedRun.platform || "unknown"} · ${formatTime(selectedRun.started_at, true)} · ${duration(selectedRun)}`;
   elements.deleteMessage.textContent = `${modelName} 的请求快照、事件和响应数据都会被永久删除。`;
+  elements.exportButton.disabled = !(selectedRun.events || []).length;
   renderCharacterStats();
   renderMobileTimeline();
   renderPayload(selectedEvent);
@@ -467,6 +590,28 @@ function openDeleteConfirmation() {
   window.setTimeout(() => elements.deleteCancel.focus(), 0);
 }
 
+function openExportDialog() {
+  const events = selectedRun?.events || [];
+  if (!events.length || exportPending) return;
+  exportPreviousFocus = document.activeElement;
+  exportSelection = new Set(events.map((_, index) => index));
+  elements.exportDescription.textContent = `${selectedRun.model || selectedRun.provider_id || "LLM Trace"} · ${events.length} 个时间线事件`;
+  setConfirmationError(elements.exportError);
+  renderExportEventList();
+  elements.exportOverlay.classList.remove("hidden");
+  window.setTimeout(() => elements.exportSelectAll.focus(), 0);
+}
+
+function closeExportDialog({ restoreFocus = true } = {}) {
+  if (exportPending) return;
+  elements.exportOverlay.classList.add("hidden");
+  setConfirmationError(elements.exportError);
+  if (restoreFocus && exportPreviousFocus instanceof HTMLElement) {
+    exportPreviousFocus.focus();
+  }
+  exportPreviousFocus = null;
+}
+
 function closeDeleteConfirmation({ restoreFocus = true } = {}) {
   if (deletePending) return;
   elements.deletePopover.classList.add("hidden");
@@ -493,8 +638,14 @@ function closeClearDialog({ restoreFocus = true } = {}) {
 }
 
 function trapDialogFocus(event) {
-  if (event.key !== "Tab" || elements.clearOverlay.classList.contains("hidden")) return;
-  const focusable = [...elements.clearDialog.querySelectorAll("button:not(:disabled)")];
+  if (event.key !== "Tab") return;
+  const dialog = !elements.exportOverlay.classList.contains("hidden")
+    ? elements.exportDialog
+    : !elements.clearOverlay.classList.contains("hidden")
+      ? elements.clearDialog
+      : null;
+  if (!dialog) return;
+  const focusable = [...dialog.querySelectorAll("button:not(:disabled), input:not(:disabled)")];
   if (!focusable.length) return;
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
@@ -553,6 +704,45 @@ elements.backButton.addEventListener("click", showMobileList);
 mobileLayout.addEventListener("change", () => {
   if (!mobileLayout.matches) document.body.classList.remove("mobile-detail");
   renderRuns();
+});
+
+elements.exportButton.addEventListener("click", openExportDialog);
+elements.exportSelectAll.addEventListener("change", () => {
+  const events = selectedRun?.events || [];
+  exportSelection = elements.exportSelectAll.checked
+    ? new Set(events.map((_, index) => index))
+    : new Set();
+  renderExportEventList();
+});
+elements.exportCancel.addEventListener("click", () => closeExportDialog());
+elements.exportOverlay.addEventListener("pointerdown", (event) => {
+  if (event.target === elements.exportOverlay && !exportPending) closeExportDialog();
+});
+elements.exportAccept.addEventListener("click", async () => {
+  if (exportPending || !exportSelection.size) return;
+  exportPending = true;
+  elements.exportCancel.disabled = true;
+  elements.exportAccept.disabled = true;
+  elements.exportAccept.setAttribute("aria-busy", "true");
+  elements.exportAccept.textContent = "正在复制";
+  setConfirmationError(elements.exportError);
+  try {
+    const copied = await copyTextToClipboard(buildTraceExport());
+    if (!copied) {
+      setConfirmationError(elements.exportError, "浏览器禁止自动复制，请允许剪贴板权限后重试。");
+      return;
+    }
+    exportPending = false;
+    closeExportDialog();
+    showToast("所选 Trace 内容已复制");
+  } catch (error) {
+    setConfirmationError(elements.exportError, error.message || "复制失败，请重试。");
+  } finally {
+    exportPending = false;
+    elements.exportCancel.disabled = false;
+    elements.exportAccept.setAttribute("aria-busy", "false");
+    renderExportSelectionControls();
+  }
 });
 
 elements.deleteButton.addEventListener("click", () => {
@@ -644,6 +834,10 @@ elements.clearAccept.addEventListener("click", async () => {
 window.addEventListener("keydown", (event) => {
   trapDialogFocus(event);
   if (event.key !== "Escape") return;
+  if (!elements.exportOverlay.classList.contains("hidden") && !exportPending) {
+    closeExportDialog();
+    return;
+  }
   if (!elements.clearOverlay.classList.contains("hidden") && !clearPending) {
     closeClearDialog();
     return;
@@ -655,30 +849,7 @@ window.addEventListener("keydown", (event) => {
 
 elements.copyButton.addEventListener("click", async () => {
   const text = elements.payloadView.textContent;
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      showToast("JSON 已复制");
-      return;
-    }
-  } catch (_) {
-    // Restricted plugin iframes may reject the modern Clipboard API.
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  document.body.append(textarea);
-  textarea.select();
-  let copied = false;
-  try {
-    copied = document.execCommand("copy");
-  } finally {
-    textarea.remove();
-  }
-  if (copied) {
+  if (await copyTextToClipboard(text)) {
     showToast("JSON 已复制");
     return;
   }

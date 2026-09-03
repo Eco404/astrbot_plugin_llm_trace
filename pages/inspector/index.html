@@ -127,43 +127,58 @@
                 <p id="detailRunId" class="run-id"></p>
               </div>
 
-              <div class="delete-wrap">
+              <div class="detail-actions">
                 <button
-                  id="deleteButton"
-                  class="icon-button danger-button"
+                  id="exportButton"
+                  class="icon-button"
                   type="button"
-                  title="删除当前 Trace"
-                  aria-label="删除当前 Trace"
-                  aria-expanded="false"
-                  aria-controls="deletePopover"
+                  title="复制本次 Trace"
+                  aria-label="复制本次 Trace"
                   aria-haspopup="dialog"
-                  data-tooltip="删除当前 Trace"
+                  aria-controls="exportDialog"
+                  data-tooltip="复制本次 Trace"
                 >
-                  <svg class="icon"><use href="#icon-trash"></use></svg>
+                  <svg class="icon"><use href="#icon-copy"></use></svg>
                 </button>
 
-                <section
-                  id="deletePopover"
-                  class="delete-popover hidden"
-                  role="dialog"
-                  aria-labelledby="deleteTitle"
-                  aria-describedby="deleteMessage"
-                >
-                  <div class="confirmation-heading">
-                    <span class="danger-mark" aria-hidden="true">
-                      <svg class="icon"><use href="#icon-alert"></use></svg>
-                    </span>
-                    <div>
-                      <h3 id="deleteTitle">删除这条 Trace？</h3>
-                      <p id="deleteMessage">请求快照、事件和响应数据都会被永久删除。</p>
+                <div class="delete-wrap">
+                  <button
+                    id="deleteButton"
+                    class="icon-button danger-button"
+                    type="button"
+                    title="删除当前 Trace"
+                    aria-label="删除当前 Trace"
+                    aria-expanded="false"
+                    aria-controls="deletePopover"
+                    aria-haspopup="dialog"
+                    data-tooltip="删除当前 Trace"
+                  >
+                    <svg class="icon"><use href="#icon-trash"></use></svg>
+                  </button>
+
+                  <section
+                    id="deletePopover"
+                    class="delete-popover hidden"
+                    role="dialog"
+                    aria-labelledby="deleteTitle"
+                    aria-describedby="deleteMessage"
+                  >
+                    <div class="confirmation-heading">
+                      <span class="danger-mark" aria-hidden="true">
+                        <svg class="icon"><use href="#icon-alert"></use></svg>
+                      </span>
+                      <div>
+                        <h3 id="deleteTitle">删除这条 Trace？</h3>
+                        <p id="deleteMessage">请求快照、事件和响应数据都会被永久删除。</p>
+                      </div>
                     </div>
-                  </div>
-                  <p id="deleteError" class="confirmation-error hidden" role="alert"></p>
-                  <div class="confirmation-actions">
-                    <button id="deleteCancel" class="button secondary" type="button">取消</button>
-                    <button id="deleteAccept" class="button danger solid" type="button">删除 Trace</button>
-                  </div>
-                </section>
+                    <p id="deleteError" class="confirmation-error hidden" role="alert"></p>
+                    <div class="confirmation-actions">
+                      <button id="deleteCancel" class="button secondary" type="button">取消</button>
+                      <button id="deleteAccept" class="button danger solid" type="button">删除 Trace</button>
+                    </div>
+                  </section>
+                </div>
               </div>
             </header>
 
@@ -212,6 +227,42 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <div id="exportOverlay" class="confirm-overlay hidden">
+      <section
+        id="exportDialog"
+        class="export-dialog glass"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="exportTitle"
+        aria-describedby="exportDescription"
+      >
+        <div class="confirmation-heading">
+          <span class="export-mark" aria-hidden="true">
+            <svg class="icon"><use href="#icon-copy"></use></svg>
+          </span>
+          <div>
+            <p class="section-label">Trace export</p>
+            <h2 id="exportTitle">复制本次 Trace</h2>
+            <p id="exportDescription" class="export-description"></p>
+          </div>
+        </div>
+
+        <label class="export-select-all">
+          <input id="exportSelectAll" type="checkbox" />
+          <span>全选时间线</span>
+          <strong id="exportSelectedCount">0 / 0</strong>
+        </label>
+
+        <div id="exportEventList" class="export-event-list" aria-label="选择要复制的时间线"></div>
+        <p id="exportError" class="confirmation-error hidden" role="alert"></p>
+
+        <div class="confirmation-actions">
+          <button id="exportCancel" class="button secondary" type="button">取消</button>
+          <button id="exportAccept" class="button" type="button">复制已选内容</button>
+        </div>
+      </section>
+    </div>
 
     <div id="clearOverlay" class="confirm-overlay hidden">
       <section
