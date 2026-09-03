@@ -39,6 +39,33 @@ class TraceSerializerTest(unittest.TestCase):
         self.assertEqual(converted["media_type"], "image/png")
         self.assertNotIn("AAAA", json.dumps(converted))
 
+    def test_summarizes_mutable_binary_buffers(self) -> None:
+        serializer = TraceSerializer()
+
+        converted = serializer.convert(
+            {
+                "buffer": bytearray(b"abc"),
+                "view": memoryview(b"def"),
+            }
+        )
+
+        self.assertEqual(converted["buffer"]["type"], "bytearray")
+        self.assertEqual(converted["buffer"]["size"], 3)
+        self.assertEqual(converted["view"]["type"], "memoryview")
+        self.assertEqual(converted["view"]["size"], 3)
+        self.assertEqual(serializer.character_count(bytearray(b"abc")), 3)
+        self.assertEqual(serializer.character_count(memoryview(b"def")), 3)
+
+    def test_truncates_oversized_sequences(self) -> None:
+        serializer = TraceSerializer()
+
+        converted = serializer.convert(
+            list(range(TraceSerializer._MAX_COLLECTION_ITEMS + 1))
+        )
+
+        self.assertEqual(len(converted), TraceSerializer._MAX_COLLECTION_ITEMS + 1)
+        self.assertEqual(converted[-1]["type"], "truncated_sequence")
+
     def test_metadata_mode_hides_message_content(self) -> None:
         serializer = TraceSerializer(capture_content=False)
 

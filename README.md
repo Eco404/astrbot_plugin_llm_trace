@@ -47,4 +47,12 @@ data/plugin_data/astrbot_plugin_llm_trace/traces.db
 
 ## 当前边界
 
-`on_llm_request` 只代表 Agent 启动前的公开请求。Agent 内部的每次 Provider 调用、fallback、重试，以及 SDK 最终 HTTP JSON 尚未由公开事件钩子暴露。本插件后续会把“Provider 深度探针”作为独立的实验模式加入，避免首版通过 monkey patch 影响正常对话。
+`on_llm_request` 只代表 Agent 启动前的公开请求。Agent 内部的每次 Provider 调用、fallback、重试，以及 SDK 最终 HTTP JSON 不会作为公开事件钩子提供。
+
+### 实验性 Provider 深度探针
+
+`experimental_provider_probe` 默认关闭。开启后，插件会运行时包装已加载的 Chat Provider，记录 `text_chat` 和 `text_chat_stream` 调用，即使当前对话的插件集未启用 LLM Trace。探针记录会以 `provider_probe` 平台和 `provider.*` 时间线事件单独展示。`abort_signal` 等运行时控制对象只记录类型和状态摘要，不会递归保存事件循环内部状态。
+
+当同一次对话原本已启用 LLM Trace 时，主链 Trace 与对应的 Provider 探针 Trace 会并存；这是为了保持实验性探针与公开 Agent 生命周期互不混写。
+
+这是非侵入宿主源码条件下的调试能力，不保证完整覆盖：Provider 热重载的短暂窗口、其他插件直接使用厂商 SDK/HTTP 请求、已缓存的 Provider 方法，以及 Provider 内部的重试和 Key 切换都可能无法细分或遗漏。开启前请确认全局采集和内容策略符合预期。

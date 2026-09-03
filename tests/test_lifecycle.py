@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from astrbot.api.provider import LLMResponse
 
@@ -46,6 +47,35 @@ def _plugin_with_active_run(run_id: str) -> tuple[LLMTracePlugin, _FakeStore]:
 
 
 class LifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_emits_forwardable_heartbeat(self) -> None:
+        plugin = LLMTracePlugin.__new__(LLMTracePlugin)
+        plugin._subscribers = set()
+        plugin._terminating = False
+
+        async def timeout_immediately(awaitable, *_args, **_kwargs):
+            awaitable.close()
+            raise TimeoutError
+
+        with (
+            patch(
+                "astrbot_plugin_llm_trace.main.asyncio.wait_for",
+                new=timeout_immediately,
+            ),
+            patch(
+                "astrbot_plugin_llm_trace.main.stream_response",
+                side_effect=lambda events: events,
+            ),
+        ):
+            stream = await plugin.page_stream()
+            self.assertEqual(await anext(stream), "event: ready\ndata: {}\n\n")
+            self.assertEqual(
+                await anext(stream),
+                "event: heartbeat\ndata: {}\n\n",
+            )
+            await stream.aclose()
+
+        self.assertEqual(plugin._subscribers, set())
+
     async def test_agent_error_finishes_trace(self) -> None:
         plugin, store = _plugin_with_active_run("run-error")
         event = _FakeEvent("run-error")

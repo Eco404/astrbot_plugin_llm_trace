@@ -45,10 +45,18 @@
         <div class="toolbar" aria-label="Trace 控制">
           <label class="capture-control">
             <span class="capture-copy">
-              <strong id="captureLabel">采集关闭</strong>
-              <span>请求记录</span>
+              <strong>采集</strong>
+              <span>主链记录</span>
             </span>
-            <input id="captureToggle" type="checkbox" role="switch" />
+            <input id="captureToggle" type="checkbox" role="switch" aria-label="启用 Trace 采集" />
+            <span class="switch-track" aria-hidden="true"><span></span></span>
+          </label>
+          <label class="capture-control probe-control">
+            <span class="capture-copy">
+              <strong id="probeLabel">探针</strong>
+              <span>Provider 调用</span>
+            </span>
+            <input id="probeToggle" type="checkbox" role="switch" aria-label="启用实验性 Provider 深度探针" />
             <span class="switch-track" aria-hidden="true"><span></span></span>
           </label>
           <button

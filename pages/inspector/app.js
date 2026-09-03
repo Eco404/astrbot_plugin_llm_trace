@@ -2,7 +2,8 @@ const bridge = window.AstrBotPluginPage;
 
 const elements = {
   captureToggle: document.getElementById("captureToggle"),
-  captureLabel: document.getElementById("captureLabel"),
+  probeToggle: document.getElementById("probeToggle"),
+  probeLabel: document.getElementById("probeLabel"),
   refreshButton: document.getElementById("refreshButton"),
   clearButton: document.getElementById("clearButton"),
   connectionStatus: document.getElementById("connectionStatus"),
@@ -56,6 +57,13 @@ let selectedRun = null;
 let selectedEvent = null;
 let expandedRunId = null;
 let subscriptionId = null;
+let streamConnectPromise = null;
+let streamReconnectTimer = null;
+let streamWatchdogTimer = null;
+let streamEpoch = 0;
+let streamReconnectAttempts = 0;
+let streamLastActivity = 0;
+let unloading = false;
 let searchTimer = null;
 let refreshTimer = null;
 let toastTimer = null;
@@ -65,7 +73,12 @@ let deletePending = false;
 let clearPending = false;
 let exportPending = false;
 let exportSelection = new Set();
+let payloadCopyText = "{}";
 const mobileLayout = window.matchMedia("(max-width: 720px)");
+const PAYLOAD_PREVIEW_MAX_CHARS = 250_000;
+const STREAM_HEARTBEAT_TIMEOUT_MS = 40_000;
+const STREAM_RECONNECT_BASE_MS = 1_000;
+const STREAM_RECONNECT_MAX_MS = 15_000;
 
 const STATUS_LABELS = {
   completed: "已完成",
@@ -266,12 +279,12 @@ function eventSummary(event) {
   if (event.event_type === "tool.start" || event.event_type === "tool.end") {
     return payload.name || "tool";
   }
-  if (event.event_type === "llm.request") {
+  if (event.event_type === "llm.request" || event.event_type === "provider.request") {
     const chars = payload.request?.stats?.input_chars;
     const model = payload.provider?.model || "request snapshot";
     return `${model}${Number.isFinite(chars) ? ` · ${chars.toLocaleString()} 字符` : ""}`;
   }
-  if (event.event_type === "llm.response") {
+  if (event.event_type === "llm.response" || event.event_type === "provider.response") {
     const chars = payload.stats?.output_chars;
     return `${payload.role || "response"}${Number.isFinite(chars) ? ` · ${chars.toLocaleString()} 字符` : ""}`;
   }
@@ -366,8 +379,12 @@ function buildTraceExport() {
 
 function renderCharacterStats() {
   elements.charStats.replaceChildren();
-  const requestEvent = selectedRun?.events?.find((event) => event.event_type === "llm.request");
-  const responseEvent = selectedRun?.events?.find((event) => event.event_type === "llm.response");
+  const requestEvent = selectedRun?.events?.find(
+    (event) => event.event_type === "llm.request" || event.event_type === "provider.request",
+  );
+  const responseEvent = selectedRun?.events?.find(
+    (event) => event.event_type === "llm.response" || event.event_type === "provider.response",
+  );
   const requestStats = requestEvent?.payload?.request?.stats || {};
   const responseStats = responseEvent?.payload?.stats || {};
   const toolResultChars = (selectedRun?.events || [])
@@ -443,13 +460,21 @@ function renderPayload(event) {
     elements.payloadEmpty.classList.remove("hidden");
     elements.payloadView.classList.add("hidden");
     elements.payloadView.textContent = "{}";
+    payloadCopyText = "{}";
     elements.copyButton.disabled = true;
     return;
   }
+  const compactPayload = JSON.stringify(event.payload ?? {});
   elements.payloadTitle.textContent = event.event_type;
   elements.payloadEmpty.classList.add("hidden");
   elements.payloadView.classList.remove("hidden");
-  elements.payloadView.textContent = JSON.stringify(event.payload, null, 2);
+  if (compactPayload.length > PAYLOAD_PREVIEW_MAX_CHARS) {
+    payloadCopyText = compactPayload;
+    elements.payloadView.textContent = `${compactPayload.slice(0, PAYLOAD_PREVIEW_MAX_CHARS)}\n\n[Payload 预览已截断，复制按钮仍会复制完整 JSON]`;
+  } else {
+    payloadCopyText = JSON.stringify(event.payload ?? {}, null, 2);
+    elements.payloadView.textContent = payloadCopyText;
+  }
   elements.copyButton.disabled = false;
 }
 
@@ -509,13 +534,18 @@ async function handleRunClick(runId) {
   await loadRun(runId);
 }
 
-async function loadStatus() {
-  const status = await bridge.apiGet("status");
+function renderStatus(status) {
   elements.captureToggle.checked = status.enabled;
-  elements.captureLabel.textContent = status.enabled ? "采集开启" : "采集关闭";
+  elements.probeToggle.checked = Boolean(status.experimental_provider_probe);
+  elements.probeToggle.disabled = !status.enabled;
+  elements.probeLabel.textContent = status.provider_probe_active ? "探针中" : "探针";
   elements.queueSize.textContent = String(status.queue_size);
   elements.droppedRecords.textContent = `${status.dropped_records} / ${status.write_errors}`;
-  elements.privacyMode.textContent = `${status.hash_identity ? "身份哈希" : "原始身份"} · ${status.capture_content ? "记录正文" : "仅元数据"}`;
+  elements.privacyMode.textContent = `${status.hash_identity ? "身份哈希" : "原始身份"} · ${status.capture_content ? "记录正文" : "仅元数据"} · ${status.provider_probe_active ? "实验探针" : "主链 Hook"}`;
+}
+
+async function loadStatus() {
+  renderStatus(await bridge.apiGet("status"));
 }
 
 async function loadRuns() {
@@ -580,6 +610,103 @@ function scheduleRefresh() {
       showToast(error.message || "同步 Trace 失败");
     }
   }, 250);
+}
+
+function clearStreamWatchdog() {
+  window.clearTimeout(streamWatchdogTimer);
+  streamWatchdogTimer = null;
+}
+
+function armStreamWatchdog(epoch) {
+  streamLastActivity = Date.now();
+  clearStreamWatchdog();
+  streamWatchdogTimer = window.setTimeout(() => {
+    scheduleStreamReconnect(epoch, { immediate: true });
+  }, STREAM_HEARTBEAT_TIMEOUT_MS);
+}
+
+async function releaseStreamSubscription() {
+  const activeSubscriptionId = subscriptionId;
+  subscriptionId = null;
+  if (activeSubscriptionId === null) return;
+  try {
+    await bridge.unsubscribeSSE(activeSubscriptionId);
+  } catch (_) {
+    // A dead parent-side stream may already have removed this subscription.
+  }
+}
+
+function scheduleStreamReconnect(epoch, { immediate = false } = {}) {
+  if (unloading || epoch !== streamEpoch) return;
+  if (streamReconnectTimer !== null) {
+    if (!immediate) return;
+    window.clearTimeout(streamReconnectTimer);
+    streamReconnectTimer = null;
+  }
+  streamEpoch += 1;
+  clearStreamWatchdog();
+  setConnection("正在重连", "pending");
+  const delay = immediate
+    ? 0
+    : Math.min(
+      STREAM_RECONNECT_BASE_MS * (2 ** streamReconnectAttempts),
+      STREAM_RECONNECT_MAX_MS,
+    );
+  streamReconnectAttempts += 1;
+  streamReconnectTimer = window.setTimeout(() => {
+    streamReconnectTimer = null;
+    ensureStreamConnected();
+  }, delay);
+}
+
+async function connectStream() {
+  if (unloading) return;
+  const epoch = ++streamEpoch;
+  await releaseStreamSubscription();
+  try {
+    const nextSubscriptionId = await bridge.subscribeSSE("stream", {
+      onOpen() {
+        if (epoch !== streamEpoch || unloading) return;
+        streamReconnectAttempts = 0;
+        setConnection("实时连接", "connected");
+        armStreamWatchdog(epoch);
+      },
+      onMessage(event) {
+        if (epoch !== streamEpoch || unloading) return;
+        streamReconnectAttempts = 0;
+        setConnection("实时连接", "connected");
+        armStreamWatchdog(epoch);
+        if (event.eventType !== "ready" && event.eventType !== "heartbeat") {
+          scheduleRefresh();
+        }
+      },
+      onError() {
+        scheduleStreamReconnect(epoch);
+      },
+    });
+    if (epoch !== streamEpoch || unloading) {
+      try {
+        await bridge.unsubscribeSSE(nextSubscriptionId);
+      } catch (_) {
+        // The stale stream may already be closed by the bridge.
+      }
+      return;
+    }
+    subscriptionId = nextSubscriptionId;
+    streamReconnectAttempts = 0;
+    setConnection("实时连接", "connected");
+    armStreamWatchdog(epoch);
+  } catch (_) {
+    scheduleStreamReconnect(epoch);
+  }
+}
+
+function ensureStreamConnected() {
+  if (unloading || streamConnectPromise !== null) return streamConnectPromise;
+  streamConnectPromise = connectStream().finally(() => {
+    streamConnectPromise = null;
+  });
+  return streamConnectPromise;
 }
 
 function openDeleteConfirmation() {
@@ -664,17 +791,7 @@ async function initialize() {
   applyTheme(context);
   bridge.onContext(applyTheme);
   await refresh();
-  subscriptionId = await bridge.subscribeSSE("stream", {
-    onOpen() {
-      setConnection("实时连接", "connected");
-    },
-    onMessage(event) {
-      if (event.eventType !== "ready") scheduleRefresh();
-    },
-    onError() {
-      setConnection("正在重连", "pending");
-    },
-  });
+  await ensureStreamConnected();
 }
 
 elements.captureToggle.addEventListener("change", async () => {
@@ -682,14 +799,28 @@ elements.captureToggle.addEventListener("change", async () => {
   elements.captureToggle.disabled = true;
   try {
     const status = await bridge.apiPost("status", { enabled: requested });
-    elements.captureToggle.checked = status.enabled;
-    elements.captureLabel.textContent = status.enabled ? "采集开启" : "采集关闭";
+    renderStatus(status);
     showToast(status.enabled ? "LLM Trace 已开启" : "LLM Trace 已关闭");
   } catch (error) {
     elements.captureToggle.checked = !requested;
     showToast(error.message || "状态更新失败");
   } finally {
     elements.captureToggle.disabled = false;
+  }
+});
+
+elements.probeToggle.addEventListener("change", async () => {
+  const requested = elements.probeToggle.checked;
+  elements.probeToggle.disabled = true;
+  try {
+    const status = await bridge.apiPost("status", { experimental_provider_probe: requested });
+    renderStatus(status);
+    showToast(status.provider_probe_active ? "实验 Provider 探针已开启" : "实验 Provider 探针已关闭");
+  } catch (error) {
+    elements.probeToggle.checked = !requested;
+    showToast(error.message || "实验探针更新失败");
+  } finally {
+    elements.probeToggle.disabled = !elements.captureToggle.checked;
   }
 });
 
@@ -704,6 +835,17 @@ elements.backButton.addEventListener("click", showMobileList);
 mobileLayout.addEventListener("change", () => {
   if (!mobileLayout.matches) document.body.classList.remove("mobile-detail");
   renderRuns();
+});
+window.addEventListener("online", () => {
+  scheduleStreamReconnect(streamEpoch, { immediate: true });
+});
+document.addEventListener("visibilitychange", () => {
+  if (
+    document.visibilityState === "visible"
+    && Date.now() - streamLastActivity > STREAM_HEARTBEAT_TIMEOUT_MS
+  ) {
+    scheduleStreamReconnect(streamEpoch, { immediate: true });
+  }
 });
 
 elements.exportButton.addEventListener("click", openExportDialog);
@@ -848,8 +990,7 @@ window.addEventListener("keydown", (event) => {
 });
 
 elements.copyButton.addEventListener("click", async () => {
-  const text = elements.payloadView.textContent;
-  if (await copyTextToClipboard(text)) {
+  if (await copyTextToClipboard(payloadCopyText)) {
     showToast("JSON 已复制");
     return;
   }
@@ -863,6 +1004,10 @@ elements.copyButton.addEventListener("click", async () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  unloading = true;
+  streamEpoch += 1;
+  window.clearTimeout(streamReconnectTimer);
+  clearStreamWatchdog();
   if (subscriptionId !== null) bridge.unsubscribeSSE(subscriptionId);
 });
 

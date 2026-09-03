@@ -17,10 +17,25 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 
 from .serializer import TraceSerializer
 from .storage import TraceStore
+from .provider_probe import ProviderProbe
 
 PLUGIN_NAME = "astrbot_plugin_llm_trace"
 PLUGIN_VERSION = "0.2.0"
 RUN_ID_EXTRA_KEY = "_llm_trace_run_id"
+PROVIDER_CALL_PARAMETERS = (
+    "prompt",
+    "session_id",
+    "image_urls",
+    "audio_urls",
+    "func_tool",
+    "contexts",
+    "system_prompt",
+    "tool_calls_result",
+    "model",
+    "extra_user_content_parts",
+    "tool_choice",
+    "request_max_retries",
+)
 
 
 @register(
@@ -37,6 +52,9 @@ class LLMTracePlugin(Star):
         self.context = context
         self.config = config
         self.enabled = bool(config.get("enabled", False))
+        self.provider_probe_enabled = bool(
+            config.get("experimental_provider_probe", False)
+        )
         self.serializer = TraceSerializer(
             capture_content=bool(config.get("capture_content", True)),
             hash_identity=bool(config.get("hash_identity", True)),
@@ -52,6 +70,15 @@ class LLMTracePlugin(Star):
         self._sequence_by_run: dict[str, int] = {}
         self._subscribers: set[asyncio.Queue[str]] = set()
         self._terminating = False
+        self._provider_probe = ProviderProbe(
+            self.context.get_all_providers,
+            self._start_provider_probe,
+            self._finish_provider_probe,
+            self._fail_provider_probe,
+            self._cancel_provider_probe,
+            logger,
+        )
+        self._provider_probe_task: asyncio.Task[None] | None = None
         self._register_page_api()
 
     def _register_page_api(self) -> None:
@@ -196,9 +223,7 @@ class LLMTracePlugin(Star):
         prompt_chars = self.serializer.character_count(req.prompt)
         system_prompt_chars = self.serializer.character_count(req.system_prompt)
         context_chars = self.serializer.message_character_count(req.contexts)
-        extra_user_chars = self.serializer.character_count(
-            req.extra_user_content_parts
-        )
+        extra_user_chars = self.serializer.character_count(req.extra_user_content_parts)
         tool_schema_chars = tools["schema_chars"]
         tool_result_chars = self.serializer.character_count(req.tool_calls_result)
         return {
@@ -270,9 +295,7 @@ class LLMTracePlugin(Star):
             "usage": self.serializer.convert(getattr(resp, "usage", None)),
             "raw_completion": raw_completion,
             "stats": {
-                "output_chars": self.serializer.character_count(
-                    resp.completion_text
-                ),
+                "output_chars": self.serializer.character_count(resp.completion_text),
                 "reasoning_chars": self.serializer.character_count(
                     resp.reasoning_content
                 ),
@@ -282,11 +305,194 @@ class LLMTracePlugin(Star):
             },
         }
 
+    def _provider_probe_active(self) -> bool:
+        return self.enabled and self.provider_probe_enabled and not self._terminating
+
+    def _provider_probe_values(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        values = dict(kwargs)
+        for index, value in enumerate(args):
+            if index >= len(PROVIDER_CALL_PARAMETERS):
+                break
+            values.setdefault(PROVIDER_CALL_PARAMETERS[index], value)
+        return values
+
+    def _provider_probe_metadata(self, provider: Any, model: Any) -> dict[str, Any]:
+        provider_config = getattr(provider, "provider_config", {})
+        metadata = {
+            "provider_id": str(
+                provider_config.get("id", "")
+                if isinstance(provider_config, dict)
+                else ""
+            ),
+            "provider_type": "",
+            "model": str(model or ""),
+            "provider_class": type(provider).__name__,
+        }
+        try:
+            provider_meta = provider.meta()
+            metadata["provider_id"] = str(
+                getattr(provider_meta, "id", "") or metadata["provider_id"]
+            )
+            metadata["provider_type"] = str(getattr(provider_meta, "type", "") or "")
+            metadata["model"] = str(
+                model or provider.get_model() or getattr(provider_meta, "model", "")
+            )
+        except Exception as exc:
+            metadata["metadata_error"] = type(exc).__name__
+        return metadata
+
+    def _start_provider_probe(
+        self,
+        provider: Any,
+        call_kind: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> str | None:
+        if not self._provider_probe_active():
+            return None
+
+        values = self._provider_probe_values(args, kwargs)
+        model = values.get("model")
+        metadata = self._provider_probe_metadata(provider, model)
+        request_snapshot = ProviderRequest(
+            prompt=values.get("prompt"),
+            session_id=values.get("session_id") or "",
+            image_urls=values.get("image_urls") or [],
+            audio_urls=values.get("audio_urls") or [],
+            extra_user_content_parts=values.get("extra_user_content_parts") or [],
+            func_tool=values.get("func_tool"),
+            contexts=values.get("contexts") or [],
+            system_prompt=values.get("system_prompt") or "",
+            tool_calls_result=values.get("tool_calls_result"),
+            model=metadata["model"],
+        )
+        extra_kwargs = {}
+        for key, value in values.items():
+            if key in PROVIDER_CALL_PARAMETERS:
+                continue
+            if isinstance(value, asyncio.Event):
+                extra_kwargs[key] = {
+                    "type": type(value).__name__,
+                    "is_set": value.is_set(),
+                }
+            else:
+                extra_kwargs[key] = value
+        run_id = f"probe-{uuid.uuid4()}"
+        self._sequence_by_run[run_id] = 0
+        self.store.submit(
+            {
+                "kind": "start",
+                "run_id": run_id,
+                "span_id": "",
+                "session_id": self.serializer.identity(request_snapshot.session_id),
+                "sender_id": "",
+                "sender_name": "",
+                "platform": "provider_probe",
+                "provider_id": metadata["provider_id"],
+                "model": metadata["model"],
+                "timestamp": time.time(),
+            }
+        )
+        self._record(
+            run_id,
+            "provider.request",
+            {
+                "source": "experimental_provider_probe",
+                "call_kind": call_kind,
+                "provider": metadata,
+                "request": self._request_snapshot(request_snapshot),
+                "extra_kwargs": self.serializer.content(extra_kwargs),
+            },
+        )
+        return run_id
+
+    def _finish_provider_probe(self, run_id: str, response: LLMResponse | None) -> None:
+        if run_id not in self._sequence_by_run:
+            return
+        payload = self._response_snapshot(response)
+        payload.update(source="experimental_provider_probe")
+        self._record(run_id, "provider.response", payload)
+        self._finish_run(run_id, status="completed")
+
+    def _fail_provider_probe(self, run_id: str, error: BaseException) -> None:
+        if run_id not in self._sequence_by_run:
+            return
+        self._record(
+            run_id,
+            "provider.error",
+            {
+                "source": "experimental_provider_probe",
+                "error_type": type(error).__name__,
+                "message": "provider raised an exception",
+            },
+        )
+        self._finish_run(run_id, status="error")
+
+    def _cancel_provider_probe(self, run_id: str, error: BaseException | None) -> None:
+        if run_id not in self._sequence_by_run:
+            return
+        self._record(
+            run_id,
+            "provider.cancelled",
+            {
+                "source": "experimental_provider_probe",
+                "reason": (
+                    self.serializer.content(str(error))
+                    if error is not None
+                    else "stream closed before completion"
+                ),
+            },
+        )
+        self._finish_run(run_id, status="error")
+
+    def _sync_provider_probe(self) -> int:
+        return self._provider_probe.sync(enabled=self._provider_probe_active())
+
+    async def _update_provider_probe(self) -> None:
+        wrapped = self._sync_provider_probe()
+        if self._provider_probe_active():
+            if self._provider_probe_task is None or self._provider_probe_task.done():
+                self._provider_probe_task = asyncio.create_task(
+                    self._watch_provider_probe(), name="llm_trace_provider_probe"
+                )
+            logger.info("LLM Trace provider probe enabled for %s providers", wrapped)
+            return
+        await self._stop_provider_probe_watch()
+
+    async def _watch_provider_probe(self) -> None:
+        try:
+            while self._provider_probe_active():
+                await asyncio.sleep(2)
+                self._sync_provider_probe()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if not self._provider_probe_active():
+                self._provider_probe.restore()
+
+    async def _stop_provider_probe_watch(self) -> None:
+        task = self._provider_probe_task
+        self._provider_probe_task = None
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._provider_probe.restore()
+
     @filter.on_astrbot_loaded()
     async def initialize(self) -> None:
         """Initialize storage after AstrBot has loaded."""
         await self._ensure_ready()
-        logger.info("LLM Trace initialized; capture enabled=%s", self.enabled)
+        await self._update_provider_probe()
+        logger.info(
+            "LLM Trace initialized; capture enabled=%s provider_probe=%s",
+            self.enabled,
+            self.provider_probe_enabled,
+        )
 
     @filter.on_llm_request(priority=-1_000_000)
     async def capture_llm_request(
@@ -354,9 +560,7 @@ class LLMTracePlugin(Star):
                 {
                     "name": getattr(tool, "name", type(tool).__name__),
                     "args": self.serializer.content(tool_args),
-                    "stats": {
-                        "args_chars": self.serializer.character_count(tool_args)
-                    },
+                    "stats": {"args_chars": self.serializer.character_count(tool_args)},
                 },
             )
 
@@ -454,6 +658,7 @@ class LLMTracePlugin(Star):
         await self._ensure_ready()
         yield event.plain_result(
             f"LLM Trace: {'已启用' if self.enabled else '已停用'}\n"
+            f"实验 Provider 探针: {'已开启' if self._provider_probe_active() else '已关闭'}\n"
             f"待写入: {self.store.queue.qsize()}\n"
             f"已丢弃: {self.store.dropped_records}\n"
             f"写入错误: {self.store.write_errors}"
@@ -466,6 +671,7 @@ class LLMTracePlugin(Star):
         self.enabled = True
         self.config["enabled"] = True
         self.config.save_config()
+        await self._update_provider_probe()
         yield event.plain_result("LLM Trace 已启用。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -475,6 +681,7 @@ class LLMTracePlugin(Star):
         self.enabled = False
         self.config["enabled"] = False
         self.config.save_config()
+        await self._update_provider_probe()
         yield event.plain_result("LLM Trace 已停用。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -511,18 +718,38 @@ class LLMTracePlugin(Star):
             f"当前插件集: {plugins if plugins is not None else ['*']}\n"
             f"Trace在插件集中: {included}\n"
             f"采集开关: {self.enabled}\n"
+            f"实验 Provider 探针: {self._provider_probe_active()}\n"
             f"当前Provider: {provider_label}"
         )
 
     async def page_status(self):
         if request.method == "POST":
             payload = await request.json(default={})
-            enabled = payload.get("enabled")
-            if not isinstance(enabled, bool):
-                return error_response("enabled must be a boolean", status_code=400)
-            self.enabled = enabled
-            self.config["enabled"] = enabled
+            changed = False
+            if "enabled" in payload:
+                enabled = payload["enabled"]
+                if not isinstance(enabled, bool):
+                    return error_response("enabled must be a boolean", status_code=400)
+                self.enabled = enabled
+                self.config["enabled"] = enabled
+                changed = True
+            if "experimental_provider_probe" in payload:
+                provider_probe = payload["experimental_provider_probe"]
+                if not isinstance(provider_probe, bool):
+                    return error_response(
+                        "experimental_provider_probe must be a boolean",
+                        status_code=400,
+                    )
+                self.provider_probe_enabled = provider_probe
+                self.config["experimental_provider_probe"] = provider_probe
+                changed = True
+            if not changed:
+                return error_response(
+                    "enabled or experimental_provider_probe must be a boolean",
+                    status_code=400,
+                )
             self.config.save_config()
+            await self._update_provider_probe()
         await self._ensure_ready()
         return json_response(
             {
@@ -532,6 +759,9 @@ class LLMTracePlugin(Star):
                 "write_errors": self.store.write_errors,
                 "capture_content": self.serializer.capture_content,
                 "hash_identity": self.serializer.hash_identity,
+                "experimental_provider_probe": self.provider_probe_enabled,
+                "provider_probe_active": self._provider_probe_active(),
+                "provider_probe_providers": self._provider_probe.binding_count,
                 "version": PLUGIN_VERSION,
             }
         )
@@ -573,7 +803,7 @@ class LLMTracePlugin(Star):
                         message = await asyncio.wait_for(queue.get(), timeout=15)
                         yield f"data: {message}\n\n"
                     except TimeoutError:
-                        yield ": keepalive\n\n"
+                        yield "event: heartbeat\ndata: {}\n\n"
             finally:
                 self._subscribers.discard(queue)
 
@@ -597,4 +827,5 @@ class LLMTracePlugin(Star):
         """Flush pending trace writes during plugin unload."""
         self._terminating = True
         self._subscribers.clear()
+        await self._stop_provider_probe_watch()
         await self.store.stop()

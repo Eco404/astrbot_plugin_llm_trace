@@ -5,6 +5,12 @@
     "type": "bool",
     "default": false
   },
+  "experimental_provider_probe": {
+    "description": "启用实验性 Provider 深度探针",
+    "hint": "运行时包装已加载的 Chat Provider，可记录未启用 Trace 的会话与其他插件的内部调用。可能遗漏热重载窗口、直接 SDK 请求和 Provider 内部重试。",
+    "type": "bool",
+    "default": false
+  },
   "capture_content": {
     "description": "记录消息正文",
     "hint": "关闭后只记录消息角色、数量、长度和哈希。",
@@ -49,4 +55,3 @@
     "default": 1000
   }
 }
-

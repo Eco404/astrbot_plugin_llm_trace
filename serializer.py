@@ -13,6 +13,9 @@ from typing import Any
 class TraceSerializer:
     """Convert AstrBot runtime objects into bounded, redacted JSON values."""
 
+    _MAX_DEPTH = 20
+    _MAX_NODES = 20_000
+    _MAX_COLLECTION_ITEMS = 1_000
     _SENSITIVE_KEY = re.compile(
         r"(?:^|[_-])(?:api[_-]?key|authorization|cookie|password|passwd|secret|"
         r"access[_-]?token|refresh[_-]?token|credential)(?:$|[_-])|^token$",
@@ -51,6 +54,8 @@ class TraceSerializer:
         *,
         key: str = "",
         _seen: set[int] | None = None,
+        _depth: int = 0,
+        _budget: list[int] | None = None,
     ) -> Any:
         """Convert an arbitrary runtime value to JSON-compatible data.
 
@@ -58,24 +63,39 @@ class TraceSerializer:
             value: Runtime value to convert.
             key: Parent field name, used for redaction.
             _seen: Object identifiers already traversed.
+            _depth: Current recursive depth.
+            _budget: Remaining node budget shared by recursive calls.
 
         Returns:
             A bounded JSON-compatible representation.
         """
         if key and self._SENSITIVE_KEY.search(key):
             return "[REDACTED]"
+        budget = _budget if _budget is not None else [self._MAX_NODES]
+        if _depth > self._MAX_DEPTH:
+            return "[TRUNCATED: max depth]"
+        if budget[0] <= 0:
+            return "[TRUNCATED: node budget]"
+        budget[0] -= 1
         if value is None or isinstance(value, (bool, int, float)):
             return value
         if isinstance(value, str):
             return self._string(value)
-        if isinstance(value, bytes):
+        if isinstance(value, bytes | bytearray | memoryview):
+            size = value.nbytes if isinstance(value, memoryview) else len(value)
             return {
-                "type": "bytes",
-                "size": len(value),
+                "type": type(value).__name__,
+                "size": size,
                 "sha256": hashlib.sha256(value).hexdigest(),
             }
         if isinstance(value, enum.Enum):
-            return self.convert(value.value, key=key, _seen=_seen)
+            return self.convert(
+                value.value,
+                key=key,
+                _seen=_seen,
+                _depth=_depth + 1,
+                _budget=budget,
+            )
         if isinstance(value, Path):
             return self._string(str(value))
 
@@ -97,18 +117,50 @@ class TraceSerializer:
                 }
 
             if isinstance(value, Mapping):
-                return {
-                    str(item_key): self.convert(
+                result = {}
+                for index, (item_key, item_value) in enumerate(value.items()):
+                    if index >= self._MAX_COLLECTION_ITEMS:
+                        result["[TRACE_TRUNCATED]"] = {
+                            "type": "mapping_items",
+                            "limit": self._MAX_COLLECTION_ITEMS,
+                        }
+                        break
+                    result[str(item_key)] = self.convert(
                         item_value,
                         key=str(item_key),
                         _seen=seen,
+                        _depth=_depth + 1,
+                        _budget=budget,
                     )
-                    for item_key, item_value in value.items()
-                }
+                return result
             if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-                return [self.convert(item, _seen=seen) for item in value]
+                result = []
+                for index, item in enumerate(value):
+                    if index >= self._MAX_COLLECTION_ITEMS:
+                        result.append(
+                            {
+                                "type": "truncated_sequence",
+                                "limit": self._MAX_COLLECTION_ITEMS,
+                            }
+                        )
+                        break
+                    result.append(
+                        self.convert(
+                            item,
+                            _seen=seen,
+                            _depth=_depth + 1,
+                            _budget=budget,
+                        )
+                    )
+                return result
             if hasattr(value, "__dict__"):
-                return self.convert(vars(value), key=key, _seen=seen)
+                return self.convert(
+                    vars(value),
+                    key=key,
+                    _seen=seen,
+                    _depth=_depth + 1,
+                    _budget=budget,
+                )
             return self._string(repr(value))
         except Exception as exc:
             return f"[UNSERIALIZABLE: {type(exc).__name__}]"
@@ -178,8 +230,8 @@ class TraceSerializer:
             return 0
         if isinstance(value, str):
             return len(value)
-        if isinstance(value, bytes):
-            return len(value)
+        if isinstance(value, bytes | bytearray | memoryview):
+            return value.nbytes if isinstance(value, memoryview) else len(value)
 
         seen = _seen if _seen is not None else set()
         obj_id = id(value)
@@ -198,9 +250,7 @@ class TraceSerializer:
                     for field in dataclasses.fields(value)
                 }
             if isinstance(value, Mapping):
-                return sum(
-                    self.character_count(item, seen) for item in value.values()
-                )
+                return sum(self.character_count(item, seen) for item in value.values())
             if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
                 return sum(self.character_count(item, seen) for item in value)
             if hasattr(value, "__dict__"):
