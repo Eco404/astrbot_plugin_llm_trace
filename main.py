@@ -789,7 +789,7 @@ class LLMTracePlugin(Star):
         run = await self.store.get_run(run_id)
         if run is None:
             return error_response("trace not found", status_code=404)
-        return json_response(run)
+        return json_response({"status": "ok", "data": run})
 
     async def page_stream(self):
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)

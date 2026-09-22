@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from astrbot.api.provider import LLMResponse
 
@@ -47,6 +48,28 @@ def _plugin_with_active_run(run_id: str) -> tuple[LLMTracePlugin, _FakeStore]:
 
 
 class LifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_error_trace_detail_uses_success_envelope(self) -> None:
+        plugin = LLMTracePlugin.__new__(LLMTracePlugin)
+        run = {
+            "run_id": "run-error",
+            "status": "error",
+            "events": [{"sequence": 1, "event_type": "agent.error"}],
+        }
+        plugin.store = SimpleNamespace(get_run=AsyncMock(return_value=run))
+        plugin._ensure_ready = AsyncMock()
+
+        with patch(
+            "astrbot_plugin_llm_trace.main.request",
+            SimpleNamespace(method="GET"),
+        ):
+            response = await plugin.page_run_detail("run-error")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            json.loads(response.body),
+            {"status": "ok", "data": run},
+        )
+
     async def test_stream_emits_forwardable_heartbeat(self) -> None:
         plugin = LLMTracePlugin.__new__(LLMTracePlugin)
         plugin._subscribers = set()
