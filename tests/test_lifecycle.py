@@ -43,6 +43,7 @@ def _plugin_with_active_run(run_id: str) -> tuple[LLMTracePlugin, _FakeStore]:
     plugin.serializer = TraceSerializer()
     plugin.store = store
     plugin._sequence_by_run = {run_id: 0}
+    plugin._fallback_state_by_run = {}
     plugin._subscribers = set()
     return plugin, store
 

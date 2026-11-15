@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from astrbot.api.provider import LLMResponse
 
-from astrbot_plugin_llm_trace.main import LLMTracePlugin
+from astrbot_plugin_llm_trace.main import LLMTracePlugin, PARENT_RUN_ID
 from astrbot_plugin_llm_trace.provider_probe import ProviderProbe
 from astrbot_plugin_llm_trace.serializer import TraceSerializer
 
@@ -64,6 +64,7 @@ def _probe_plugin(
     plugin.serializer = TraceSerializer()
     plugin.store = store
     plugin._sequence_by_run = {}
+    plugin._fallback_state_by_run = {}
     plugin._subscribers = set()
     plugin._terminating = False
     plugin._provider_probe_task = None
@@ -79,6 +80,47 @@ def _probe_plugin(
 
 
 class ProviderProbeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_marks_fallback_in_parent_trace(self) -> None:
+        primary = _FakeProvider()
+        primary.error = RuntimeError("primary unavailable")
+        fallback = _FakeProvider()
+        fallback.provider_config["id"] = "fallback-provider"
+        plugin, store = _probe_plugin([primary, fallback], probe_enabled=True)
+        plugin._sequence_by_run["main-run"] = 0
+        plugin._fallback_state_by_run["main-run"] = {
+            "abort_signal_id": None,
+            "last_provider": None,
+            "attempt": 0,
+        }
+        plugin._sync_provider_probe()
+        abort_signal = asyncio.Event()
+        token = PARENT_RUN_ID.set("main-run")
+        try:
+            with self.assertRaisesRegex(RuntimeError, "primary unavailable"):
+                await asyncio.create_task(
+                    primary.text_chat(prompt="primary", abort_signal=abort_signal)
+                )
+            await asyncio.create_task(
+                fallback.text_chat(prompt="fallback", abort_signal=abort_signal)
+            )
+        finally:
+            PARENT_RUN_ID.reset(token)
+
+        fallback_events = [
+            operation
+            for operation in store.operations
+            if operation.get("kind") == "event"
+            and operation.get("run_id") == "main-run"
+            and operation.get("event_type") == "provider.fallback"
+        ]
+        self.assertEqual(len(fallback_events), 1)
+        self.assertEqual(
+            fallback_events[0]["payload"]["from_provider"], "probe-provider"
+        )
+        self.assertEqual(
+            fallback_events[0]["payload"]["to_provider"], "fallback-provider"
+        )
+
     async def test_default_disabled_does_not_wrap_or_record(self) -> None:
         provider = _FakeProvider()
         plugin, store = _probe_plugin([provider], probe_enabled=False)

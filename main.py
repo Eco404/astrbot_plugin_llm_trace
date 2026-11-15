@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import time
@@ -36,6 +37,9 @@ PROVIDER_CALL_PARAMETERS = (
     "tool_choice",
     "request_max_retries",
 )
+PARENT_RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "llm_trace_parent_run_id", default=None
+)
 
 
 @register(
@@ -68,6 +72,7 @@ class LLMTracePlugin(Star):
             queue_size=int(config.get("queue_size", 1000)),
         )
         self._sequence_by_run: dict[str, int] = {}
+        self._fallback_state_by_run: dict[str, dict[str, Any]] = {}
         self._subscribers: set[asyncio.Queue[str]] = set()
         self._terminating = False
         self._provider_probe = ProviderProbe(
@@ -181,6 +186,9 @@ class LLMTracePlugin(Star):
             }
         )
         self._sequence_by_run.pop(run_id, None)
+        self._fallback_state_by_run.pop(run_id, None)
+        if PARENT_RUN_ID.get() == run_id:
+            PARENT_RUN_ID.set(None)
         return True
 
     def _provider_metadata(self, event: AstrMessageEvent, req: ProviderRequest) -> dict:
@@ -356,6 +364,42 @@ class LLMTracePlugin(Star):
         values = self._provider_probe_values(args, kwargs)
         model = values.get("model")
         metadata = self._provider_probe_metadata(provider, model)
+        parent_run_id = PARENT_RUN_ID.get()
+        abort_signal = values.get("abort_signal")
+        if (
+            parent_run_id
+            and parent_run_id in self._sequence_by_run
+            and isinstance(abort_signal, asyncio.Event)
+        ):
+            fallback_state = self._fallback_state_by_run.setdefault(
+                parent_run_id,
+                {"abort_signal_id": id(abort_signal), "last_provider": None, "attempt": 0},
+            )
+            if fallback_state["abort_signal_id"] is None:
+                fallback_state["abort_signal_id"] = id(abort_signal)
+            if fallback_state["abort_signal_id"] == id(abort_signal):
+                previous = fallback_state["last_provider"]
+                fallback_state["attempt"] += 1
+                if previous and (
+                    previous["provider_id"] != metadata["provider_id"]
+                    or previous["model"] != metadata["model"]
+                ):
+                    self._record(
+                        parent_run_id,
+                        "provider.fallback",
+                        {
+                            "source": "experimental_provider_probe",
+                            "from_provider": previous["provider_id"],
+                            "from_model": previous["model"],
+                            "to_provider": metadata["provider_id"],
+                            "to_model": metadata["model"],
+                            "attempt": fallback_state["attempt"],
+                        },
+                    )
+                fallback_state["last_provider"] = {
+                    "provider_id": metadata["provider_id"],
+                    "model": metadata["model"],
+                }
         request_snapshot = ProviderRequest(
             prompt=values.get("prompt"),
             session_id=values.get("session_id") or "",
@@ -506,6 +550,12 @@ class LLMTracePlugin(Star):
         if run_id is None:
             return
         metadata = self._provider_metadata(event, req)
+        self._fallback_state_by_run[run_id] = {
+            "abort_signal_id": None,
+            "last_provider": None,
+            "attempt": 0,
+        }
+        PARENT_RUN_ID.set(run_id)
         timestamp = time.time()
         self.store.submit(
             {

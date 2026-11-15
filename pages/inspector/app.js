@@ -288,6 +288,11 @@ function eventSummary(event) {
     const chars = payload.stats?.output_chars;
     return `${payload.role || "response"}${Number.isFinite(chars) ? ` · ${chars.toLocaleString()} 字符` : ""}`;
   }
+  if (event.event_type === "provider.fallback") {
+    const from = payload.from_model || payload.from_provider || "previous provider";
+    const to = payload.to_model || payload.to_provider || "fallback provider";
+    return `${from} -> ${to}`;
+  }
   const messageCount = Array.isArray(payload.messages) ? payload.messages.length : null;
   return messageCount === null ? "" : `${messageCount} 条消息`;
 }
