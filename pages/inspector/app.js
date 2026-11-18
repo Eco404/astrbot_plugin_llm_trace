@@ -239,7 +239,7 @@ function renderRuns() {
       : "";
     const actualModel = document.createElement("span");
     actualModel.className = "run-actual-model";
-    actualModel.textContent = actualModelName ? `↳ ${actualModelName}` : "";
+    actualModel.textContent = actualModelName ? `⤷ ${actualModelName}` : "";
     const status = document.createElement("span");
     status.className = "run-status";
     status.dataset.status = state;
@@ -368,6 +368,9 @@ function renderExportEventList() {
 function buildTraceExport() {
   if (!selectedRun) return "";
   const modelName = selectedRun.model || selectedRun.provider_id || "LLM Trace";
+  const actualModelName = selectedRun.actual_model && selectedRun.actual_model !== selectedRun.model
+    ? selectedRun.actual_model
+    : "";
   const events = (selectedRun.events || []).filter((_, index) => exportSelection.has(index));
   const lines = [
     "# LLM Trace",
@@ -519,6 +522,8 @@ function renderDetail() {
   elements.detailRunId.title = selectedRun.run_id;
   elements.detailTitle.textContent = modelName;
   elements.detailTitle.title = modelName;
+  elements.detailActualModel.textContent = actualModelName ? `⤷ ${actualModelName}` : "";
+  elements.detailActualModel.classList.toggle("hidden", !actualModelName);
   elements.detailStatus.textContent = statusLabel(selectedRun.status);
   elements.detailStatus.dataset.status = state;
   elements.detailMeta.textContent = `${selectedRun.platform || "unknown"} · ${formatTime(selectedRun.started_at, true)} · ${duration(selectedRun)}`;

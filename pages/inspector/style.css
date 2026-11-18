@@ -200,6 +200,25 @@ h3 {
   white-space: nowrap;
 }
 
+.detail-title-block {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.detail-actual-model {
+  color: var(--warning-text);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .glass {
   border: 0;
   border-radius: var(--radius);
