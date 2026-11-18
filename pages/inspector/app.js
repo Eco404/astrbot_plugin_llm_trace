@@ -234,6 +234,12 @@ function renderRuns() {
     const model = document.createElement("span");
     model.className = "run-model";
     model.textContent = modelName;
+    const actualModelName = run.actual_model && run.actual_model !== run.model
+      ? run.actual_model
+      : "";
+    const actualModel = document.createElement("span");
+    actualModel.className = "run-actual-model";
+    actualModel.textContent = actualModelName ? `↳ ${actualModelName}` : "";
     const status = document.createElement("span");
     status.className = "run-status";
     status.dataset.status = state;
@@ -247,7 +253,11 @@ function renderRuns() {
       chevron.append(createIcon("icon-chevron-down"));
       actions.append(chevron);
     }
-    top.append(model, actions);
+    const modelBlock = document.createElement("span");
+    modelBlock.className = "run-model-block";
+    modelBlock.append(model);
+    if (actualModelName) modelBlock.append(actualModel);
+    top.append(modelBlock, actions);
 
     const bottom = document.createElement("div");
     bottom.className = "run-bottom";

@@ -73,6 +73,8 @@ class LLMTracePlugin(Star):
         )
         self._sequence_by_run: dict[str, int] = {}
         self._fallback_state_by_run: dict[str, dict[str, Any]] = {}
+        self._initial_model_by_run: dict[str, str] = {}
+        self._actual_model_by_run: dict[str, str] = {}
         self._subscribers: set[asyncio.Queue[str]] = set()
         self._terminating = False
         self._provider_probe = ProviderProbe(
@@ -177,12 +179,17 @@ class LLMTracePlugin(Star):
         """Finish a trace once and release its in-memory correlation state."""
         if run_id not in self._sequence_by_run:
             return False
+        actual_models = getattr(self, "_actual_model_by_run", {})
+        initial_models = getattr(self, "_initial_model_by_run", {})
+        actual_model = actual_models.pop(run_id, "")
+        initial_models.pop(run_id, None)
         self.store.submit(
             {
                 "kind": "finish",
                 "run_id": run_id,
                 "timestamp": time.time(),
                 "status": status,
+                "actual_model": actual_model,
             }
         )
         self._sequence_by_run.pop(run_id, None)
@@ -290,7 +297,8 @@ class LLMTracePlugin(Star):
         raw_completion: Any = None
         if bool(self.config.get("capture_raw_response", True)):
             raw_completion = self.serializer.content(resp.raw_completion)
-        return {
+        model = self._response_model(resp)
+        snapshot = {
             "id": getattr(resp, "id", None),
             "role": resp.role,
             "is_chunk": resp.is_chunk,
@@ -312,6 +320,24 @@ class LLMTracePlugin(Star):
                 ),
             },
         }
+        if model:
+            snapshot["model"] = model
+        return snapshot
+
+    @staticmethod
+    def _response_model(resp: LLMResponse | None) -> str:
+        if resp is None:
+            return ""
+        direct = getattr(resp, "model", None)
+        if direct:
+            return str(direct)
+        raw = getattr(resp, "raw_completion", None)
+        if isinstance(raw, dict):
+            model = raw.get("model")
+            if model:
+                return str(model)
+        model = getattr(raw, "model", None)
+        return str(model) if model else ""
 
     def _provider_probe_active(self) -> bool:
         return self.enabled and self.provider_probe_enabled and not self._terminating
@@ -555,6 +581,7 @@ class LLMTracePlugin(Star):
             "last_provider": None,
             "attempt": 0,
         }
+        self._initial_model_by_run[run_id] = metadata["model"]
         PARENT_RUN_ID.set(run_id)
         timestamp = time.time()
         self.store.submit(
@@ -650,7 +677,22 @@ class LLMTracePlugin(Star):
             return
         run_id = self._run_id(event)
         if run_id:
-            self._record(run_id, "llm.response", self._response_snapshot(resp))
+            snapshot = self._response_snapshot(resp)
+            response_model = snapshot.get("model", "")
+            if response_model:
+                initial_model = self._initial_model_by_run.get(run_id, "")
+                if initial_model and response_model != initial_model:
+                    self._actual_model_by_run[run_id] = response_model
+                    self._record(
+                        run_id,
+                        "provider.fallback",
+                        {
+                            "source": "response_metadata",
+                            "from_model": initial_model,
+                            "to_model": response_model,
+                        },
+                    )
+            self._record(run_id, "llm.response", snapshot)
 
     @filter.on_agent_done()
     async def capture_agent_done(

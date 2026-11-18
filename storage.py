@@ -152,6 +152,7 @@ class TraceStore:
                     platform TEXT NOT NULL,
                     provider_id TEXT NOT NULL DEFAULT '',
                     model TEXT NOT NULL DEFAULT '',
+                    actual_model TEXT NOT NULL DEFAULT '',
                     started_at REAL NOT NULL,
                     finished_at REAL,
                     status TEXT NOT NULL DEFAULT 'running',
@@ -171,6 +172,14 @@ class TraceStore:
                     ON events(run_id, sequence);
                 """
             )
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(runs)")
+            }
+            if "actual_model" not in columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN actual_model TEXT NOT NULL DEFAULT ''"
+                )
 
     def _write_batch(self, batch: list[dict[str, Any]]) -> None:
         with self._connect() as connection:
@@ -181,8 +190,8 @@ class TraceStore:
                         """
                         INSERT OR REPLACE INTO runs (
                             run_id, span_id, session_id, sender_id, sender_name,
-                            platform, provider_id, model, started_at, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')
+                            platform, provider_id, model, actual_model, started_at, status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running')
                         """,
                         (
                             operation["run_id"],
@@ -193,6 +202,7 @@ class TraceStore:
                             operation["platform"],
                             operation.get("provider_id", ""),
                             operation.get("model", ""),
+                            operation.get("actual_model", ""),
                             operation["timestamp"],
                         ),
                     )
@@ -226,12 +236,15 @@ class TraceStore:
                     connection.execute(
                         """
                         UPDATE runs
-                        SET finished_at = ?, status = ?
+                        SET finished_at = ?, status = ?, actual_model = CASE
+                            WHEN ? != '' THEN ? ELSE actual_model END
                         WHERE run_id = ?
                         """,
                         (
                             operation["timestamp"],
                             operation.get("status", "completed"),
+                            operation.get("actual_model", ""),
+                            operation.get("actual_model", ""),
                             operation["run_id"],
                         ),
                     )

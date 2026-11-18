@@ -44,11 +44,45 @@ def _plugin_with_active_run(run_id: str) -> tuple[LLMTracePlugin, _FakeStore]:
     plugin.store = store
     plugin._sequence_by_run = {run_id: 0}
     plugin._fallback_state_by_run = {}
+    plugin._initial_model_by_run = {}
+    plugin._actual_model_by_run = {}
     plugin._subscribers = set()
     return plugin, store
 
 
 class LifecycleTest(unittest.IsolatedAsyncioTestCase):
+    async def test_records_actual_response_model_without_probe(self) -> None:
+        plugin, store = _plugin_with_active_run("run-model")
+        plugin.config = {"capture_reasoning": True, "capture_raw_response": True}
+        plugin._initial_model_by_run["run-model"] = "gemini-3.8-flash"
+        event = _FakeEvent("run-model")
+        response = LLMResponse(
+            role="assistant",
+            completion_text="fallback response",
+            raw_completion={"model": "gemini-3.5-flash-lite"},
+        )
+
+        await plugin.capture_llm_response(event, response)
+
+        fallback = [
+            operation
+            for operation in store.operations
+            if operation.get("event_type") == "provider.fallback"
+        ]
+        self.assertEqual(len(fallback), 1)
+        self.assertEqual(fallback[0]["payload"]["from_model"], "gemini-3.8-flash")
+        self.assertEqual(
+            fallback[0]["payload"]["to_model"], "gemini-3.5-flash-lite"
+        )
+        self.assertEqual(
+            store.operations[-1]["payload"]["model"], "gemini-3.5-flash-lite"
+        )
+
+        await plugin.capture_agent_done(
+            event, SimpleNamespace(messages=[]), response
+        )
+        self.assertEqual(store.operations[-1]["actual_model"], "gemini-3.5-flash-lite")
+
     async def test_error_trace_detail_uses_success_envelope(self) -> None:
         plugin = LLMTracePlugin.__new__(LLMTracePlugin)
         run = {
