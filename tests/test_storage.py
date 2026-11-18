@@ -57,10 +57,18 @@ class TraceStoreTest(unittest.IsolatedAsyncioTestCase):
         await self.store.queue.join()
 
         runs = await self.store.list_runs()
+        summary = await self.store.get_run_summary("run-1")
+        event = await self.store.get_event("run-1", 1)
         detail = await self.store.get_run("run-1")
 
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["event_count"], 1)
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["events"][0]["payload"]["request"]["stats"], {})
+        self.assertFalse(summary["events"][0]["payload_loaded"])
+        self.assertIsNotNone(event)
+        self.assertEqual(event["payload"]["prompt"], "hello")
+        self.assertTrue(event["payload_loaded"])
         self.assertIsNotNone(detail)
         self.assertEqual(detail["status"], "completed")
         self.assertEqual(detail["events"][0]["payload"]["prompt"], "hello")

@@ -303,7 +303,9 @@ function eventSummary(event) {
     const to = payload.to_model || payload.to_provider || "fallback provider";
     return `${from} -> ${to}`;
   }
-  const messageCount = Array.isArray(payload.messages) ? payload.messages.length : null;
+  const messageCount = Number.isFinite(payload.message_count)
+    ? payload.message_count
+    : Array.isArray(payload.messages) ? payload.messages.length : null;
   return messageCount === null ? "" : `${messageCount} 条消息`;
 }
 
@@ -393,6 +395,23 @@ function buildTraceExport() {
     );
   }
   return lines.join("\n");
+}
+
+async function loadExportPayloads() {
+  if (!selectedRun) return;
+  const events = selectedRun.events || [];
+  const indexes = [...exportSelection];
+  const loaded = await Promise.all(indexes.map(async (index) => {
+    const event = events[index];
+    if (!event || event.payload_loaded) return [index, event];
+    const result = await bridge.apiGet(`runs/${selectedRun.run_id}`, {
+      event_sequence: event.sequence,
+    });
+    return [index, result.data];
+  }));
+  for (const [index, event] of loaded) {
+    if (event) events[index] = event;
+  }
 }
 
 function renderCharacterStats() {
@@ -496,7 +515,7 @@ function renderPayload(event) {
   elements.copyButton.disabled = false;
 }
 
-function selectEvent(event, button) {
+async function selectEvent(event, button) {
   selectedEvent = event;
   for (const item of document.querySelectorAll(".event-item")) {
     const isActive = item === button;
@@ -504,6 +523,21 @@ function selectEvent(event, button) {
     item.setAttribute("aria-pressed", String(isActive));
   }
   renderPayload(event);
+  if (!event.payload_loaded && selectedRun) {
+    try {
+      const result = await bridge.apiGet(`runs/${selectedRun.run_id}`, {
+        event_sequence: event.sequence,
+      });
+      const loadedEvent = result.data;
+      selectedRun.events = (selectedRun.events || []).map((item) => (
+        item.sequence === loadedEvent.sequence ? loadedEvent : item
+      ));
+      selectedEvent = loadedEvent;
+      renderPayload(loadedEvent);
+    } catch (error) {
+      showToast(error.message || "加载事件详情失败");
+    }
+  }
   if (mobileLayout.matches) document.body.classList.add("mobile-detail");
 }
 
@@ -611,6 +645,9 @@ async function loadRun(runId, { selectFirst = false, openMobile = false } = {}) 
       selectedEvent = null;
     }
     renderDetail();
+    if (selectFirst && selectedEvent) {
+      await selectEvent(selectedEvent, null);
+    }
     if (openMobile) document.body.classList.add("mobile-detail");
   } catch (error) {
     showToast(error.message || "加载 Trace 失败");
@@ -901,6 +938,7 @@ elements.exportAccept.addEventListener("click", async () => {
   elements.exportAccept.textContent = "正在复制";
   setConfirmationError(elements.exportError);
   try {
+    await loadExportPayloads();
     const copied = await copyTextToClipboard(buildTraceExport());
     if (!copied) {
       setConfirmationError(elements.exportError, "浏览器禁止自动复制，请允许剪贴板权限后重试。");

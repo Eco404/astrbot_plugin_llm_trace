@@ -878,7 +878,16 @@ class LLMTracePlugin(Star):
             if not deleted:
                 return error_response("trace not found", status_code=404)
             return json_response({"deleted": run_id})
-        run = await self.store.get_run(run_id)
+        query = getattr(request, "query", None)
+        event_sequence = (
+            query.get("event_sequence", None, type=int) if query is not None else None
+        )
+        if event_sequence is not None:
+            event = await self.store.get_event(run_id, event_sequence)
+            if event is None:
+                return error_response("event not found", status_code=404)
+            return json_response({"status": "ok", "data": event})
+        run = await self.store.get_run_summary(run_id)
         if run is None:
             return error_response("trace not found", status_code=404)
         return json_response({"status": "ok", "data": run})

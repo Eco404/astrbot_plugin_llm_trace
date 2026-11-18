@@ -90,7 +90,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             "status": "error",
             "events": [{"sequence": 1, "event_type": "agent.error"}],
         }
-        plugin.store = SimpleNamespace(get_run=AsyncMock(return_value=run))
+        plugin.store = SimpleNamespace(get_run_summary=AsyncMock(return_value=run))
         plugin._ensure_ready = AsyncMock()
 
         with patch(

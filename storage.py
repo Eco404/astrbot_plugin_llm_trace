@@ -89,6 +89,16 @@ class TraceStore:
         await self.start()
         return await asyncio.to_thread(self._get_run_sync, run_id)
 
+    async def get_run_summary(self, run_id: str) -> dict[str, Any] | None:
+        """Load run metadata and lightweight timeline entries."""
+        await self.start()
+        return await asyncio.to_thread(self._get_run_summary_sync, run_id)
+
+    async def get_event(self, run_id: str, sequence: int) -> dict[str, Any] | None:
+        """Load one event payload on demand."""
+        await self.start()
+        return await asyncio.to_thread(self._get_event_sync, run_id, sequence)
+
     async def clear(self) -> None:
         """Delete every stored run and event."""
         await self.start()
@@ -318,6 +328,80 @@ class TraceStore:
                     item["payload"] = {"error": "invalid stored JSON"}
                 result["events"].append(item)
             return result
+
+    @staticmethod
+    def _event_summary(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if event_type in {"tool.start", "tool.end"}:
+            return {
+                "name": payload.get("name", "tool"),
+                "stats": payload.get("stats", {}),
+            }
+        if event_type in {"llm.request", "provider.request"}:
+            return {
+                "provider": {"model": payload.get("provider", {}).get("model", "")},
+                "request": {"stats": payload.get("request", {}).get("stats", {})},
+            }
+        if event_type in {"llm.response", "provider.response"}:
+            return {
+                "role": payload.get("role", "response"),
+                "stats": payload.get("stats", {}),
+            }
+        if event_type == "provider.fallback":
+            return {
+                key: payload[key]
+                for key in ("from_provider", "from_model", "to_provider", "to_model", "attempt")
+                if key in payload
+            }
+        if isinstance(payload.get("messages"), list):
+            return {"message_count": len(payload["messages"])}
+        return {}
+
+    def _get_run_summary_sync(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["events"] = []
+            for event in connection.execute(
+                "SELECT sequence, timestamp, event_type, payload_json "
+                "FROM events WHERE run_id = ? ORDER BY sequence, id",
+                (run_id,),
+            ):
+                try:
+                    payload = json.loads(event["payload_json"])
+                except json.JSONDecodeError:
+                    payload = {}
+                result["events"].append(
+                    {
+                        "sequence": event["sequence"],
+                        "timestamp": event["timestamp"],
+                        "event_type": event["event_type"],
+                        "payload": self._event_summary(event["event_type"], payload),
+                        "payload_loaded": False,
+                    }
+                )
+            return result
+
+    def _get_event_sync(self, run_id: str, sequence: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT sequence, timestamp, event_type, payload_json "
+                "FROM events WHERE run_id = ? AND sequence = ? "
+                "ORDER BY id LIMIT 1",
+                (run_id, sequence),
+            ).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.pop("payload_json"))
+            except json.JSONDecodeError:
+                item["payload"] = {"error": "invalid stored JSON"}
+            item["payload_loaded"] = True
+            return item
 
     def _clear_sync(self) -> None:
         with self._connect() as connection:
