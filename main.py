@@ -164,7 +164,6 @@ class LLMTracePlugin(Star):
                 "sequence": sequence,
                 "timestamp": timestamp,
                 "event_type": event_type,
-                "payload": safe_payload,
             },
             ensure_ascii=False,
             separators=(",", ":"),

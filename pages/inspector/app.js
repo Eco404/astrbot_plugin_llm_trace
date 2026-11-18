@@ -19,6 +19,7 @@ const elements = {
   backButton: document.getElementById("backButton"),
   detailRunId: document.getElementById("detailRunId"),
   detailTitle: document.getElementById("detailTitle"),
+  detailActualModel: document.getElementById("detailActualModel"),
   detailStatus: document.getElementById("detailStatus"),
   detailMeta: document.getElementById("detailMeta"),
   exportButton: document.getElementById("exportButton"),
@@ -54,6 +55,7 @@ const elements = {
 
 let runs = [];
 let selectedRun = null;
+let runLoadVersion = 0;
 let selectedEvent = null;
 let expandedRunId = null;
 let subscriptionId = null;
@@ -407,7 +409,7 @@ async function loadExportPayloads() {
     const result = await bridge.apiGet(`runs/${selectedRun.run_id}`, {
       event_sequence: event.sequence,
     });
-    return [index, result.data];
+    return [index, result];
   }));
   for (const [index, event] of loaded) {
     if (event) events[index] = event;
@@ -492,8 +494,9 @@ function renderMobileTimeline() {
 }
 
 function renderPayload(event) {
-  if (!event) {
-    elements.payloadTitle.textContent = "选择时间线事件";
+  if (!event || !event.payload_loaded) {
+    elements.payloadTitle.textContent = event ? event.event_type : "选择时间线事件";
+    elements.payloadEmpty.textContent = event ? "正在加载内容…" : "选择时间线事件查看详情";
     elements.payloadEmpty.classList.remove("hidden");
     elements.payloadView.classList.add("hidden");
     elements.payloadView.textContent = "{}";
@@ -516,6 +519,9 @@ function renderPayload(event) {
 }
 
 async function selectEvent(event, button) {
+  const runId = selectedRun.run_id;
+  // Timeline buttons may still reference the summary from before payload loading.
+  event = selectedRun.events.find((item) => item.sequence === event.sequence) || event;
   selectedEvent = event;
   for (const item of document.querySelectorAll(".event-item")) {
     const isActive = item === button;
@@ -525,15 +531,17 @@ async function selectEvent(event, button) {
   renderPayload(event);
   if (!event.payload_loaded && selectedRun) {
     try {
-      const result = await bridge.apiGet(`runs/${selectedRun.run_id}`, {
+      const loadedEvent = await bridge.apiGet(`runs/${runId}`, {
         event_sequence: event.sequence,
       });
-      const loadedEvent = result.data;
+      if (selectedRun?.run_id !== runId) return;
       selectedRun.events = (selectedRun.events || []).map((item) => (
         item.sequence === loadedEvent.sequence ? loadedEvent : item
       ));
-      selectedEvent = loadedEvent;
-      renderPayload(loadedEvent);
+      if (selectedEvent?.sequence === event.sequence) {
+        selectedEvent = loadedEvent;
+        renderPayload(loadedEvent);
+      }
     } catch (error) {
       showToast(error.message || "加载事件详情失败");
     }
@@ -556,6 +564,8 @@ function renderDetail() {
   elements.detailRunId.title = selectedRun.run_id;
   elements.detailTitle.textContent = modelName;
   elements.detailTitle.title = modelName;
+  const actualModelName = selectedRun.actual_model && selectedRun.actual_model !== selectedRun.model
+    ? selectedRun.actual_model : "";
   elements.detailActualModel.textContent = actualModelName ? `⤷ ${actualModelName}` : "";
   elements.detailActualModel.classList.toggle("hidden", !actualModelName);
   elements.detailStatus.textContent = statusLabel(selectedRun.status);
@@ -572,7 +582,7 @@ function renderDetail() {
 async function handleRunClick(runId) {
   if (mobileLayout.matches) {
     expandedRunId = runId;
-    await loadRun(runId, { selectFirst: true, openMobile: true });
+    await loadRun(runId, { openMobile: true });
     return;
   }
   if (expandedRunId === runId) {
@@ -629,11 +639,21 @@ async function loadRuns() {
 }
 
 async function loadRun(runId, { selectFirst = false, openMobile = false } = {}) {
+  const version = ++runLoadVersion;
   const changedRun = selectedRun?.run_id !== runId;
   const priorSequence = changedRun ? null : selectedEvent?.sequence;
   const priorType = changedRun ? null : selectedEvent?.event_type;
+  if (changedRun) {
+    selectedEvent = null;
+    selectedRun = { ...runs.find((run) => run.run_id === runId), run_id: runId, events: [] };
+    renderDetail();
+  }
   try {
     const run = await bridge.apiGet(`runs/${runId}`);
+    if (version !== runLoadVersion) return;
+    const cachedEvents = new Map((selectedRun?.events || [])
+      .filter((event) => event.payload_loaded).map((event) => [event.sequence, event]));
+    run.events = run.events.map((event) => cachedEvents.get(event.sequence) || event);
     selectedRun = run;
     if (selectFirst) {
       selectedEvent = run.events?.[0] || null;
@@ -645,7 +665,7 @@ async function loadRun(runId, { selectFirst = false, openMobile = false } = {}) 
       selectedEvent = null;
     }
     renderDetail();
-    if (selectFirst && selectedEvent) {
+    if (selectedEvent && !selectedEvent.payload_loaded) {
       await selectEvent(selectedEvent, null);
     }
     if (openMobile) document.body.classList.add("mobile-detail");
