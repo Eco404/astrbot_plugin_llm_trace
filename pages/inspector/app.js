@@ -576,7 +576,19 @@ async function loadRuns() {
       query: elements.searchInput.value.trim(),
     });
     runs = result.items || [];
+    if (selectedRun) {
+      const summary = runs.find((run) => run.run_id === selectedRun.run_id);
+      if (summary) {
+        selectedRun = { ...selectedRun, ...summary };
+      }
+    }
     renderRuns();
+    if (selectedRun) {
+      const summary = runs.find((run) => run.run_id === selectedRun.run_id);
+      if (summary && elements.detailStatus.textContent !== statusLabel(summary.status)) {
+        renderDetail();
+      }
+    }
   } finally {
     elements.runList.setAttribute("aria-busy", "false");
   }
